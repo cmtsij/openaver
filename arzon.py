@@ -1,105 +1,160 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import cookielib, urllib2
+import openaverbase
+
 from lxml import etree
-import posixpath
-
 import sys
+import unicodedata
+import urlparse
 
 
-if len(sys.argv) == 1:
-    query="xv992"
-else:
-    query=sys.argv[1]
+class Arzon(openaverbase.OpenAverBase):
+    site = "http://www.arzon.jp"
 
-cj = cookielib.FileCookieJar()
-opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cj))
+    def login(self):
+        self.open(self.site)
 
-arzon = "http://www.arzon.jp"
-home = opener.open(arzon + "/itemlist.html?t=&m=all&s=&q="+query)
+        # login first to get cookie
+        page = self.open(self.site)
+        tree = etree.HTML(page.read())
+        e_list = tree.xpath("//td[@class='yes']/a")
+        try:
+            a = e_list[0]
+            confirm_url = a.get('href')
+            self.open(self.site + confirm_url)
+        except IndexError:
+            pass  # logged-in and got cookie already.
 
-content = home.read()
+    def search(self, query):
+        self.items = []
+
+        print u"searching: %s"%(query)
+        search_url = self.site + "/itemlist.html?list=list&t=&m=all&s=&q=" + query
+        print search_url
+        search_page = self.open(search_url,self.site)
+        tree = etree.HTML(search_page.read())
+        e_list = tree.xpath("//table[@class='listitem']/tr")
+        print "result count: %d" % (len(e_list))
+        for e in e_list:
+            try:
+                a = e.xpath(".//a[@title]")[0]
+                a_actress = e.xpath("(.//div[@class='data']/ul)[1]//a")
+            except IndexError:
+                continue
+            href = a.get('href')
+            title = a.get('title')
+            actress = u" ".join([a.text for a in a_actress])
+
+            if len(actress.split(" ")) == 1:
+                self.items += [dict(href=href, title=title, actress=actress)]
+                #print "%s|%s|%s" % (href, actress, title)
+
+        for i in xrange(len(self.items)):
+            print u"[{i}]|{item[actress]}|{item[title]}".format(i=i, item=self.items[i])
+
+        return len(self.items)
+
+    def search_actress(self, query):
+        self.items = []
+        page = 1
+        max_page = 1
+
+        print u"searching: %s"%(query)
+        while page <= max_page:
+            search_url = self.site + u"/itemlist.html?list=list&sort=-saledate&from={page}&txtcst={query}".format(page=page, query=query)
+            page += 1
+            search_page = self.open(search_url)
+            search_content = search_page.read()
+            with open("search.html","w") as f:
+                f.write(search_content)
+            tree = etree.HTML(search_content)
+
+            # get max_page
+            try:
+                max_page = int(tree.xpath("(//table/tr/td/span/b)[2]")[0].text)
+            except IndexError:
+                pass
+
+            e_list = tree.xpath("//table[@class='listitem']/tr")
+            for e in e_list:
+                href = e.xpath(".//a[@title]")[0].get('href')
+                title = e.xpath(".//a[@title]")[0].get('title')
+                actress = u" ".join(e.xpath("(.//div[@class='data']/ul)[1]//a/text()"))
+                self.items += [dict(href=href, title=title, actress=actress)]
+                #print "%s|%s|%s" % (href, actress, title)
+
+        for i in xrange(len(self.items)):
+            print u"[{i}]{title}".format(i=i, **self.items[i])
+        return len(self.items)
 
 
-tree = etree.HTML(content)
-a = tree.xpath("//td[@class='yes']/a")[0]
-url = a.get('href')
+    def fetch_item(self, index):
+        item_info = self.ItemInfo()
 
-home = opener.open(arzon + url)
-content = home.read()
+        if index >= len(self.items):
+            print "item[{0}] is not available.".format(index)
+            sys.exit(1)
 
-tree = etree.HTML(content)
-try:
-	a = tree.xpath(u"(//dt)[1]/a")[0]
-except IndexError:
-	print "Nothing found"
-	exit(0)
-	
-url = a.get('href')
+        info_url = self.site + self.items[index]['href']
+        info_page = self.open(info_url)
+        info_content = info_page.read()
+        tree = etree.HTML(info_content)
 
-home = opener.open(arzon + url)
-content = home.read()
+        # referer
+        item_info['referer'] = info_url
 
-tree = etree.HTML(content)
+        # title
+        title = tree.xpath("//div[@class='detail_title']/h1")[0].text
+        item_info['title'] = title
 
-info = {}
+        # cover_url
+        try:
+            cover_url = tree.xpath("//table[@class='item_detail']//a[@title]")[0].get('href')
+            item_info['cover_url'] = urlparse.urljoin(self.site, cover_url)
+        except IndexError:
+            with open("info.html", "w") as f:
+                f.write(page_content)
 
-# title
-title = tree.xpath("//div[@class='detail_title']/h1")[0].text
-info['title'] = title
-print info['title']
+        #infos=tree.xpath("//td[@class='caption']/table/tr")
+        trs = tree.xpath("//td[@class='caption']/table/tr")
+        for tr in trs:
+            try:
+                name = openaverbase.join_all_text_of_childrens(tr[0])
+                values = openaverbase.join_all_text_of_childrens(tr[1])
+            except IndexError:
+                continue
+            column_name = unicodedata.normalize('NFKC', unicode(name)).strip(u":")
+            column_values = unicodedata.normalize('NFKC', unicode(values))
+            item_info[openaverbase.column_name2type(column_name)] = column_values
 
-# cover_url
-cover_url = tree.xpath("//table[@class='item_detail']//a[@title='%s']" % (title))[0].get('href')
-info['cover_url'] = cover_url
-print info['cover_url']
-
-opener.addheaders += [('Referer', arzon + url)]
-print opener.addheaders
-jpg = opener.open(info['cover_url'])
-
-jpg_name = posixpath.basename(info['cover_url'])
-with open(jpg_name, "w") as f:
-    f.write(jpg.read())
+        # workaround to fix item_info[]
+        item_info['part_number'] = item_info['part_number'].replace(u"廃盤", "").strip()
+        item_info['release_date'] = item_info['release_date'].split()[0].replace("/", "-")
+        self.items[index]['item_info'] = item_info
+        return item_info
 
 
-#infos=tree.xpath("//td[@class='caption']/table/tr")
-trs = tree.xpath("//td[@class='caption']/table/tr")
+if __name__ == "__main__":
+    query = u"小倉ゆず"  # just for debug
+    index = 0  # just for debug
+    if len(sys.argv) >= 2:
+        query = sys.argv[1].decode('utf-8')
+    if len(sys.argv) >= 3:
+        index = int(sys.argv[2])
 
-key_trans_table = {
-    #key, keynames
-    "actress": [u"AV女優"],
-    "studio": [u"AVメーカー"],
-    "label": [u"AVレーベル"],
-    "series": [u"シリーズ"],
-    "director": [u"監督"],
-    "release_date": [u"発売日"],
-    "duration": [u"収録時間"],
-    "part_number": [u"品番"]};
+    oa = Arzon()
+    oa.login()
 
-for tr in trs:
-    try:
-        name = tr.getchildren()[0].text
-        value = tr.getchildren()[1]
-    except IndexError:
-        continue
+    #num = oa.search_actress(query)
+    num = oa.search_actress(query)
+    print "num: %d"%(num)
 
-    if len(value) > 0:
-        value = value.getchildren()[0]
-    value = value.text
+    for i in xrange(num):
+        item_info = oa.fetch_item(i)
+        print item_info['part_number']
+    exit(0)
 
-    if not isinstance(name, unicode):
-        continue
-    if not isinstance(value, unicode):
-        continue
+    item_info = oa.fetch_item(index)
+    item_info.debug()
 
-    name = name.strip().strip(u":：")
-    value = value.strip()
-
-    for key, keynames in key_trans_table.iteritems():
-        if name in keynames:
-            info[key] = value
-
-for key, value in info.iteritems():
-    print "%s=%s" % (key, value)
